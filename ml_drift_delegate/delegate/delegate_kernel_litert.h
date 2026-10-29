@@ -240,6 +240,11 @@ class DelegateKernelLiteRt : public DelegateKernel {
   // Returns true if the tensor buffer is an AHardwareBuffer.
   bool IsAhwbTensorBuffer(const GpuTensorBufferPtr& tensor_buffer) const;
 
+  // Resolves the effective TfLiteTensor for a given index, mapping synthetic
+  // dequantized tensors back to original signature tensors when available.
+  TfLiteTensor* GetEffectiveTensor(TfLiteContext* context,
+                                   int tensor_idx) const;
+
   // Tensor descriptors for I/O tensors.
   // The size and order of these vectors should be the same as input_indices_
   // and output_indices_ of the base class.
