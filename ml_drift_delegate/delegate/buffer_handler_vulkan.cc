@@ -28,13 +28,10 @@
 #include "ml_drift/syrtis/memory.h"  // from @ml_drift
 #include "ml_drift/syrtis/vulkan_spatial_tensor.h"  // from @ml_drift
 #include "ml_drift/syrtis/vulkan_wrapper.h"  // from @ml_drift
-#include "litert/c/litert_any.h"
 #include "litert/c/litert_common.h"
 #include "litert/c/litert_custom_tensor_buffer.h"
-#include "litert/c/litert_environment.h"
-#include "litert/c/litert_environment_options.h"
+#include "litert/c/litert_model_types.h"
 #include "litert/c/litert_tensor_buffer_types.h"
-#include "litert/cc/litert_expected.h"
 #include "litert/cc/litert_macros.h"
 #include "litert/runtime/tensor_buffer_lockstate.h"
 #include "ml_drift_delegate/delegate/buffer_handler_utils.h"
@@ -57,6 +54,18 @@ struct VulkanMemoryInfo : public HwMemoryInfo {
   LockState lock_state;
   ::litert::ml_drift::SharedVulkanEnv* vk_env;
 };
+
+void UpdateRawHandle(VulkanMemoryInfo* memory_info) {
+  if (memory_info->vk_tensor.GetBufferHandle() != VK_NULL_HANDLE) {
+    memory_info->raw_handle =
+        reinterpret_cast<void*>(memory_info->vk_tensor.GetBufferHandle());
+  } else if (memory_info->vk_tensor.GetImageHandle() != VK_NULL_HANDLE) {
+    memory_info->raw_handle =
+        reinterpret_cast<void*>(memory_info->vk_tensor.GetImageHandle());
+  } else {
+    memory_info->raw_handle = nullptr;
+  }
+}
 
 }  // namespace
 
@@ -97,6 +106,55 @@ LiteRtStatus LiteRtCreateVulkanMemory(LiteRtGpuDeviceId device_id,
 
   // Returns `VulkanSpatialTensor*` as the `memory_handle`.
   memory_info->memory_handle = &memory_info->vk_tensor;
+  UpdateRawHandle(memory_info.get());
+
+  *vulkan_memory_info = memory_info.release();
+  return kLiteRtStatusOk;
+}
+
+LiteRtStatus LiteRtImportVulkanMemory(LiteRtGpuDeviceId device_id,
+                                      LiteRtGpuQueueId queue_id,
+                                      const LiteRtRankedTensorType* tensor_type,
+                                      LiteRtTensorBufferType buffer_type,
+                                      HwMemoryHandle hw_buffer_handle,
+                                      size_t bytes, size_t packed_bytes,
+                                      HwMemoryInfoPtr* vulkan_memory_info) {
+  if (hw_buffer_handle == nullptr || vulkan_memory_info == nullptr) {
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+  int fp16_scale = IsGpuFloat16Memory(buffer_type) ? 2 : 1;
+  auto tensor_desc =
+      ::litert::ml_drift::CreateTensorDescriptor(*tensor_type, buffer_type);
+  if (!tensor_desc.ok()) {
+    ABSL_LOG(ERROR) << "Failed to create tensor descriptor for import: "
+                    << tensor_desc.status();
+    return kLiteRtStatusErrorUnsupported;
+  } else if (tensor_desc->GetMemorySizeInBytes() * fp16_scale < packed_bytes) {
+    ABSL_LOG(ERROR) << "Too big memory requested: max_size="
+                    << tensor_desc->GetMemorySizeInBytes()
+                    << " vs requested=" << packed_bytes;
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+
+  if (device_id == nullptr) {
+    ABSL_LOG(ERROR) << "Vulkan environment is missing in parameters";
+    return kLiteRtStatusErrorInvalidArgument;
+  }
+  auto* vk_env = static_cast<::litert::ml_drift::SharedVulkanEnv*>(device_id);
+
+  auto memory_info = std::make_unique<VulkanMemoryInfo>(
+      VulkanMemoryInfo{.tensor_type = *tensor_type,
+                       .buffer_type = buffer_type,
+                       .packed_bytes = packed_bytes,
+                       .lock_state = LockState::kUnlocked,
+                       .vk_env = vk_env});
+  LITERT_RETURN_IF_ERROR(::ml_drift::syrtis::CreateTensorShared(
+      &vk_env->vulkan_env(), *tensor_desc,
+      reinterpret_cast<VkDeviceMemory>(hw_buffer_handle),
+      &memory_info->vk_tensor));
+
+  memory_info->memory_handle = &memory_info->vk_tensor;
+  UpdateRawHandle(memory_info.get());
 
   *vulkan_memory_info = memory_info.release();
   return kLiteRtStatusOk;

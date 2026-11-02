@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <array>
 #include <cstdint>
 #include <tuple>
 #include <utility>
@@ -122,9 +123,15 @@ TEST_P(ParameterizedTest, Basic) {
   EXPECT_EQ(input_names.at(0), "arg0");
   EXPECT_EQ(input_names.at(1), "arg1");
   EXPECT_TRUE(input_buffers[0].IsVulkanMemory());
+  LITERT_ASSERT_OK_AND_ASSIGN(void* vk_input0_handle,
+                              input_buffers[0].GetVulkanMemory());
+  EXPECT_NE(vk_input0_handle, nullptr);
   ASSERT_TRUE(input_buffers[0].Write<float>(
       absl::MakeConstSpan(kTestInput0Tensor, kTestInput0Size)));
   EXPECT_TRUE(input_buffers[1].IsVulkanMemory());
+  LITERT_ASSERT_OK_AND_ASSIGN(void* vk_input1_handle,
+                              input_buffers[1].GetVulkanMemory());
+  EXPECT_NE(vk_input1_handle, nullptr);
   ASSERT_TRUE(input_buffers[1].Write<float>(
       absl::MakeConstSpan(kTestInput1Tensor, kTestInput1Size)));
 
@@ -137,6 +144,9 @@ TEST_P(ParameterizedTest, Basic) {
   EXPECT_EQ(output_names.size(), 1);
   EXPECT_EQ(output_names.at(0), "tfl.add");
   EXPECT_TRUE(output_buffers[0].IsVulkanMemory());
+  LITERT_ASSERT_OK_AND_ASSIGN(void* vk_output0_handle,
+                              output_buffers[0].GetVulkanMemory());
+  EXPECT_NE(vk_output0_handle, nullptr);
   {
     auto lock_and_addr = litert::TensorBufferScopedLock::Create<const float>(
         output_buffers[0], TensorBuffer::LockMode::kRead);
@@ -208,6 +218,93 @@ TEST(CompiledModelVulkanTest, GpuEnvironment) {
       auto vulkan_env_2,
       env_options_2.GetOption(kLiteRtEnvOptionTagVulkanEnvironment));
   EXPECT_EQ(std::get<int64_t>(vulkan_env_1), std::get<int64_t>(vulkan_env_2));
+}
+
+TEST(CompiledModelVulkanTest, ExternalVulkanEnvironment) {
+  // To workaround the memory leak in Nvidia's driver
+  absl::LeakCheckDisabler disable_leak_check;
+
+  auto owner_env = litert::Environment::Create({});
+  ASSERT_TRUE(owner_env);
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto owner_options,
+      CreateGpuOptions(TestParams({false, GpuOptions::Precision::kDefault,
+                                   GpuOptions::BufferStorageType::kBuffer})));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto owner_model,
+      CompiledModel::Create(
+          *owner_env, testing::GetTestFilePath(kModelFileName), owner_options));
+  LITERT_ASSERT_OK_AND_ASSIGN(auto owner_env_options, owner_env->GetOptions());
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto owner_vulkan_env,
+      owner_env_options.GetOption(kLiteRtEnvOptionTagVulkanEnvironment));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto physical_device,
+      owner_env_options.GetOption(kLiteRtEnvOptionTagVulkanPhysicalDevice));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto device,
+      owner_env_options.GetOption(kLiteRtEnvOptionTagVulkanDevice));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto queue, owner_env_options.GetOption(kLiteRtEnvOptionTagVulkanQueue));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto queue_family_index,
+      owner_env_options.GetOption(kLiteRtEnvOptionTagVulkanQueueFamilyIndex));
+
+  // Create a second LiteRT Environment sharing the external Vulkan device and
+  // queue handles.
+  const std::array<Environment::Option, 4> external_options = {
+      Environment::Option{Environment::OptionTag::VulkanPhysicalDevice,
+                          physical_device},
+      Environment::Option{Environment::OptionTag::VulkanDevice, device},
+      Environment::Option{Environment::OptionTag::VulkanQueue, queue},
+      Environment::Option{Environment::OptionTag::VulkanQueueFamilyIndex,
+                          queue_family_index},
+  };
+  LITERT_ASSERT_OK_AND_ASSIGN(auto external_env,
+                              litert::Environment::Create(external_options));
+
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto model_options,
+      CreateGpuOptions(TestParams({true, GpuOptions::Precision::kFp32,
+                                   GpuOptions::BufferStorageType::kBuffer})));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto compiled_model,
+      CompiledModel::Create(external_env,
+                            testing::GetTestFilePath(kModelFileName),
+                            model_options));
+
+  LITERT_ASSERT_OK_AND_ASSIGN(auto external_env_options,
+                              external_env.GetOptions());
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto external_vulkan_env,
+      external_env_options.GetOption(kLiteRtEnvOptionTagVulkanEnvironment));
+  EXPECT_NE(std::get<int64_t>(owner_vulkan_env),
+            std::get<int64_t>(external_vulkan_env));
+
+  LITERT_ASSERT_OK_AND_ASSIGN(auto input_buffers,
+                              compiled_model.CreateInputBuffers());
+  LITERT_ASSERT_OK_AND_ASSIGN(auto output_buffers,
+                              compiled_model.CreateOutputBuffers());
+
+  LITERT_ASSERT_OK_AND_ASSIGN(void* vk_input0_buffer,
+                              input_buffers[0].GetVulkanMemory());
+  EXPECT_NE(vk_input0_buffer, nullptr);
+  LITERT_ASSERT_OK_AND_ASSIGN(void* vk_output0_buffer,
+                              output_buffers[0].GetVulkanMemory());
+  EXPECT_NE(vk_output0_buffer, nullptr);
+
+  ASSERT_TRUE(input_buffers[0].Write<float>(
+      absl::MakeConstSpan(kTestInput0Tensor, kTestInput0Size)));
+  ASSERT_TRUE(input_buffers[1].Write<float>(
+      absl::MakeConstSpan(kTestInput1Tensor, kTestInput1Size)));
+
+  ASSERT_TRUE(compiled_model.Run(input_buffers, output_buffers));
+
+  auto lock_and_addr = litert::TensorBufferScopedLock::Create<const float>(
+      output_buffers[0], TensorBuffer::LockMode::kRead);
+  ASSERT_TRUE(lock_and_addr);
+  auto output = absl::MakeSpan(lock_and_addr->second, kTestOutputSize);
+  EXPECT_THAT(output, Pointwise(FloatNear(1e-5), kTestOutputTensor));
 }
 
 }  // namespace

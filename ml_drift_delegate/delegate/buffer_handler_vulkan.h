@@ -40,6 +40,13 @@ LiteRtStatus LiteRtLockVulkanMemory(HwMemoryInfoPtr hw_memory_info,
                                     void** host_memory_ptr);
 LiteRtStatus LiteRtUnlockVulkanMemory(HwMemoryInfoPtr hw_memory_info);
 LiteRtStatus LiteRtClearVulkanMemory(HwMemoryInfoPtr hw_memory_info);
+LiteRtStatus LiteRtImportVulkanMemory(LiteRtGpuDeviceId device_id,
+                                      LiteRtGpuQueueId queue_id,
+                                      const LiteRtRankedTensorType* tensor_type,
+                                      LiteRtTensorBufferType buffer_type,
+                                      HwMemoryHandle hw_buffer_handle,
+                                      size_t bytes, size_t packed_bytes,
+                                      HwMemoryInfoPtr* vulkan_memory_info);
 
 #ifdef __cplusplus
 }  // extern "C"
